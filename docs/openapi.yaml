@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Кредитный кабинет предпринимателя - Backend API
-  version: 0.1.0
+  version: 0.2.0
   description: |-
     HTTP-контракт кредитного кабинета. Стек, обработка заявок, устройство сессий и локальных заглушек описаны в [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -12,6 +12,8 @@ info:
     Каждая мутация существующей заявки принимает expected_version. Несовпадение возвращает 409. В ответах команд возвращается состояние на момент фиксации, worker может сразу его изменить. Изменения данных, документов и уточнений увеличивают версию заявки.
 
     Ответы всех auth-операций имеют Cache-Control: no-store.
+
+    Матрица переходов, технические статусы и внутренние контракты заглушек зафиксированы в [BACKEND_RULES.md](BACKEND_RULES.md). Продукт можно установить или изменить только в Draft; после подачи он неизменяем. Документы загружаются и удаляются только в Draft/NeedsInfo, удаление запрещено для документов любого снимка. Сотрудник банка не имеет доступа к черновикам, включая скачивание их документов.
 servers:
   - url: http://localhost:8000/api/v1
     description: Локальная разработка; адрес и порт предварительные.
@@ -56,11 +58,11 @@ paths:
                 type: string
                 const: no-store
         '400':
-          $ref: '#/components/responses/BadRequest'
+          $ref: '#/components/responses/AuthBadRequest'
         '401':
-          $ref: '#/components/responses/Unauthorized'
+          $ref: '#/components/responses/AuthUnauthorized'
         '503':
-          $ref: '#/components/responses/Unavailable'
+          $ref: '#/components/responses/AuthUnavailable'
       security: []
       requestBody:
         required: true
@@ -103,8 +105,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/TokenResponse'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          $ref: '#/components/responses/AuthBadRequest'
         '401':
+          description: Токен недействителен, истёк или повторно использован.
           headers:
             Cache-Control:
               schema:
@@ -124,7 +127,7 @@ paths:
                     message: Повторное использование refresh token.
                     details: []
         '503':
-          $ref: '#/components/responses/Unavailable'
+          $ref: '#/components/responses/AuthUnavailable'
   /auth/logout:
     post:
       tags:
@@ -150,9 +153,9 @@ paths:
                 type: string
                 const: no-store
         '400':
-          $ref: '#/components/responses/BadRequest'
+          $ref: '#/components/responses/AuthBadRequest'
         '503':
-          $ref: '#/components/responses/Unavailable'
+          $ref: '#/components/responses/AuthUnavailable'
   /auth/me:
     get:
       tags:
@@ -161,14 +164,20 @@ paths:
       summary: Текущий пользователь и членство
       responses:
         '200':
+          description: Операция выполнена.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/CurrentUser'
         '401':
-          $ref: '#/components/responses/Unauthorized'
+          $ref: '#/components/responses/AuthUnauthorized'
         '503':
-          $ref: '#/components/responses/Unavailable'
+          $ref: '#/components/responses/AuthUnavailable'
   /products:
     get:
       tags:
@@ -177,6 +186,7 @@ paths:
       summary: Получить активные продукты
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -198,6 +208,7 @@ paths:
       summary: Информация о продукте
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -220,6 +231,7 @@ paths:
       summary: Получить доступные компании
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -239,6 +251,7 @@ paths:
       summary: Создать компанию
       responses:
         '201':
+          description: Ресурс создан.
           content:
             application/json:
               schema:
@@ -275,6 +288,7 @@ paths:
       summary: Получить профиль компании
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -298,6 +312,7 @@ paths:
       summary: Изменить профиль компании
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -338,6 +353,7 @@ paths:
       summary: Получить заявки доступных компаний
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -371,6 +387,7 @@ paths:
       summary: Создать черновик
       responses:
         '201':
+          description: Ресурс создан.
           content:
             application/json:
               schema:
@@ -412,6 +429,7 @@ paths:
       summary: Получить состояние заявки
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -435,6 +453,7 @@ paths:
       summary: Изменить данные черновика
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -479,6 +498,7 @@ paths:
       summary: Подать заявку
       responses:
         '202':
+          description: Команда принята; состояние может измениться фоновым обработчиком.
           content:
             application/json:
               schema:
@@ -518,6 +538,7 @@ paths:
       summary: История заявки
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -541,9 +562,11 @@ paths:
       tags:
         - Applications
       operationId: signApplication
-      summary: Подписание заявки сотрудником компании
+      summary: Имитация подписания заявки представителем компании
+      description: Только Accepted. Атомарно переводит заявку в Signed и создаёт задание имитации выдачи; worker переводит в Disbursed. Повторная команда возвращает 409.
       responses:
         '202':
+          description: Команда принята; состояние может измениться фоновым обработчиком.
           content:
             application/json:
               schema:
@@ -578,6 +601,7 @@ paths:
       summary: Получить документы заявки
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -603,6 +627,7 @@ paths:
       summary: Загрузить документ
       responses:
         '201':
+          description: Ресурс создан.
           content:
             application/json:
               schema:
@@ -623,7 +648,7 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '503':
           $ref: '#/components/responses/Unavailable'
-      description: Не более 10 MiB; application/pdf, image/jpeg, image/png.
+      description: Только Draft или NeedsInfo. Не более 10 MiB; application/pdf, image/jpeg, image/png. Версия и состояние повторно проверяются после загрузки в S3, перед фиксацией метаданных. Дубликаты типов документов допустимы; снимок содержит явно выбранные документы.
       parameters:
         - $ref: '#/components/parameters/application_id'
       requestBody:
@@ -644,6 +669,7 @@ paths:
       summary: Удалить документ
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -660,7 +686,7 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/Unavailable'
-      description: Документ, включённый хотя бы в один снимок, удалять нельзя.
+      description: Только Draft или NeedsInfo. Документ, включённый хотя бы в один снимок, удалять нельзя. Несовпадение версии или запрет по состоянию/снимку возвращает 409.
       parameters:
         - $ref: '#/components/parameters/application_id'
         - $ref: '#/components/parameters/document_id'
@@ -679,6 +705,7 @@ paths:
       summary: Скачать документ
       responses:
         '200':
+          description: Операция выполнена.
           headers:
             Content-Disposition:
               schema:
@@ -708,7 +735,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/Unavailable'
-      description: Доступ клиенту компании и сотруднику банка. Имя файла передаётся в Content-Disposition.
+      description: Доступ клиенту компании и сотруднику банка после подачи заявки. Для Draft доступ имеет только клиент компании. Сотруднику банка для Draft возвращается 404. Имя файла передаётся в Content-Disposition.
       parameters:
         - $ref: '#/components/parameters/application_id'
         - $ref: '#/components/parameters/document_id'
@@ -720,6 +747,7 @@ paths:
       summary: Получить запросы уточнений
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -744,8 +772,10 @@ paths:
         - Information
       operationId: answerInformationRequest
       summary: Ответить на запрос уточнений
+      description: Только NeedsInfo и открытый запрос этой заявки. Объединяет уточнённые поля с текущими данными, проверяет полноту и выбранные документы, атомарно закрывает запрос, создаёт новый снимок и задание, переводит в Checking. Проверки и скоринг запускаются заново. Повторный ответ возвращает 409.
       responses:
         '202':
+          description: Команда принята; состояние может измениться фоновым обработчиком.
           content:
             application/json:
               schema:
@@ -777,7 +807,6 @@ paths:
                 comment: Уточнены финансовые показатели и действующие обязательства. Приложены финансовая отчётность
                   и справка о задолженности.
                 data:
-                  product_id: 22222222-2222-4222-8222-222222222222
                   amount: '1200000.00'
                   term_months: 18
                   purpose: Закупка товарных запасов и пополнение оборотных средств интернет-магазина
@@ -798,6 +827,7 @@ paths:
       summary: Предложенные условия
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -824,6 +854,7 @@ paths:
       summary: Принять предложение
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -859,6 +890,7 @@ paths:
       summary: Отклонить предложение
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -894,6 +926,7 @@ paths:
       summary: Получить очередь заявок
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -940,6 +973,7 @@ paths:
       summary: Заявка с результатами проверок и скоринга
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -955,7 +989,7 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
       description: checks и scoring_result относятся к current_snapshot_id; decisions содержит историю решений с
-        их snapshot_id.
+        их snapshot_id. Draft недоступен, возвращается 404.
       parameters:
         - $ref: '#/components/parameters/application_id'
   /bank/applications/{application_id}/snapshots:
@@ -966,6 +1000,7 @@ paths:
       summary: Получить версии данных рассмотрения
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -992,6 +1027,7 @@ paths:
       summary: Получить снимок
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -1018,6 +1054,7 @@ paths:
       summary: Получить документы рассматриваемой заявки
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -1044,6 +1081,7 @@ paths:
       summary: Получить запросы и ответы клиента
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -1069,6 +1107,7 @@ paths:
       summary: Запросить уточнения у клиента
       responses:
         '201':
+          description: Ресурс создан.
           content:
             application/json:
               schema:
@@ -1111,6 +1150,7 @@ paths:
       summary: Принять ручное решение и предложить условия
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -1161,6 +1201,7 @@ paths:
       summary: Отклонить заявку
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -1202,6 +1243,7 @@ paths:
       summary: Возобновить обработку после технического сбоя
       responses:
         '202':
+          description: Команда принята; состояние может измениться фоновым обработчиком.
           content:
             application/json:
               schema:
@@ -1218,8 +1260,7 @@ paths:
           $ref: '#/components/responses/Conflict'
         '503':
           $ref: '#/components/responses/Unavailable'
-      description: Создаёт задание для текущего снимка, без произвольного изменения бизнес-статуса. Нельзя перезапустить
-        завершённую заявку или получить иной результат успешного скоринга этой командой.
+      description: Только processing.status=blocked и retry_available=true в Checking, Scoring или Signed, без активного задания. Создаёт задание для незавершённого шага текущего снимка, без изменения бизнес-статуса. Для Signed возобновляет имитацию выдачи. Успешные шаги не пересчитываются; Rejected, Declined и Disbursed не перезапускаются. Гонка с worker или повтор команды возвращает 409.
       parameters:
         - $ref: '#/components/parameters/application_id'
       requestBody:
@@ -1238,6 +1279,7 @@ paths:
       summary: Проверить работу
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -1252,6 +1294,7 @@ paths:
       summary: Проверить готовность
       responses:
         '200':
+          description: Операция выполнена.
           content:
             application/json:
               schema:
@@ -1629,6 +1672,9 @@ components:
       type: object
       additionalProperties: false
       properties:
+        product_id:
+          type: string
+          format: uuid
         amount:
           $ref: '#/components/schemas/Amount'
         term_months:
@@ -1641,7 +1687,26 @@ components:
           maxLength: 2000
         financials:
           $ref: '#/components/schemas/Financials'
-      description: Изменяемые поля черновика заявки. financials при передаче заменяется целиком.
+      description: Только Draft. Продукт можно установить или сменить. Отсутствующие поля сохраняются; financials при передаче заменяется целиком; null отклоняется. После смены продукта полнота проверяется при подаче.
+      minProperties: 1
+    LoanClarification:
+      type: object
+      additionalProperties: false
+      properties:
+        amount:
+          $ref: '#/components/schemas/Amount'
+        term_months:
+          type: integer
+          minimum: 1
+          maximum: 600
+        purpose:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        financials:
+          $ref: '#/components/schemas/Financials'
+      minProperties: 1
+      description: Частичное уточнение в NeedsInfo без смены продукта. Отсутствующие поля сохраняются; financials заменяется целиком; null отклоняется. При ответе проверяются итоговые объединённые данные.
     ApplicationCreate:
       type: object
       additionalProperties: false
@@ -1846,14 +1911,14 @@ components:
           minLength: 1
           maxLength: 4000
         data:
-          $ref: '#/components/schemas/LoanInput'
+          $ref: '#/components/schemas/LoanClarification'
         document_ids:
           type: array
+          uniqueItems: true
           items:
             type: string
             format: uuid
-      description: data изменяет данные LoanInput по правилам ApplicationUpdate. document_ids ссылается только на
-        документы этой заявки.
+      description: data уточняет текущие данные без смены продукта. document_ids — полный набор документов нового снимка, включая сохраняемые старые и новые документы этой заявки; проверяются требования продукта и запроса. Пропуск старого документа не удаляет его из истории или S3. Для нового обязательного документа нужен ID, отсутствующий в снимке, по которому создан запрос.
       required:
         - comment
         - document_ids
@@ -1878,12 +1943,17 @@ components:
           maxLength: 4000
         requested_fields:
           type: array
+          uniqueItems: true
           items:
             type: string
+            pattern: ^/(amount|term_months|purpose|financials(/(as_of_date|monthly_revenue|monthly_expenses|outstanding_debt|monthly_debt_payments))?)$
         required_document_types:
           type: array
+          uniqueItems: true
           items:
             type: string
+            minLength: 1
+            maxLength: 100
         answer:
           $ref: '#/components/schemas/InformationAnswer'
         created_at:
@@ -1927,14 +1997,25 @@ components:
           maxLength: 4000
         requested_fields:
           type: array
+          uniqueItems: true
           items:
             type: string
+            pattern: ^/(amount|term_months|purpose|financials(/(as_of_date|monthly_revenue|monthly_expenses|outstanding_debt|monthly_debt_payments))?)$
         required_document_types:
           type: array
+          uniqueItems: true
           items:
             type: string
-      description: Только ManualReview; создаёт один открытый запрос и переводит заявку в NeedsInfo. requested_fields
-        - JSON Pointer относительно LoanInput. Клиенту не передаются внутренние комментарии.
+            minLength: 1
+            maxLength: 100
+      description: Только ManualReview; создаёт один открытый запрос и переводит заявку в NeedsInfo. requested_fields — уточняемые JSON Pointer относительно LoanInput без product_id. Хотя бы один из requested_fields/required_document_types должен быть непустым. Поля должны присутствовать в data ответа (financials передаётся целиком); обязательные типы требуют новых документов относительно исходного снимка. Клиенту не передаются внутренние комментарии. Система может создать такой же запрос при недостаточности данных в Checking/Scoring.
+      anyOf:
+        - properties:
+            requested_fields:
+              minItems: 1
+        - properties:
+            required_document_types:
+              minItems: 1
       required:
         - expected_version
         - message
@@ -1977,8 +2058,7 @@ components:
           type: array
           items:
             type: string
-      description: Проверяется соответствие продукту и актуальному решению; ставка - годовой процент с двумя знаками
-        после точки.
+      description: product_id совпадает с продуктом снимка заявки; сумма/срок проверяются по зафиксированным в снимке ограничениям продукта. Альтернативные условия в MVP меняют сумму и срок, но не продукт. Ставка — годовой процент с двумя знаками после точки, условия не меняются после решения.
       required:
         - product_id
         - amount
@@ -2092,6 +2172,50 @@ components:
         - data
         - document_ids
         - created_at
+    FnsCheckResult:
+      type: object
+      additionalProperties: false
+      properties:
+        company_found:
+          type: boolean
+        business_status:
+          type: string
+          enum: [active, inactive, unknown]
+        registration_matches:
+          type: boolean
+        unreliable_data:
+          type: boolean
+        reason_codes:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+      required: [company_found, business_status, registration_matches, unreliable_data, reason_codes]
+      description: Синтетический ответ ФНС. При company_found=false business_status=unknown и registration_matches=false. Отсутствие компании, несовпадение данных и неактивность — успешный содержательный ответ проверки, а не техническая ошибка и не кредитный отказ.
+    BkiCheckResult:
+      type: object
+      additionalProperties: false
+      properties:
+        history_found:
+          type: boolean
+        outstanding_debt:
+          $ref: '#/components/schemas/Amount'
+        monthly_debt_payments:
+          $ref: '#/components/schemas/Amount'
+        overdue_amount:
+          $ref: '#/components/schemas/Amount'
+        max_overdue_days:
+          type: integer
+          minimum: 0
+        reason_codes:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+      required: [history_found, outstanding_debt, monthly_debt_payments, overdue_amount, max_overdue_days, reason_codes]
+      description: Синтетический ответ БКИ. При history_found=false числовые поля нулевые, reason_codes содержит NO_CREDIT_HISTORY; это отсутствие наблюдаемых данных заглушки, а не подтверждение отсутствия реальных обязательств.
     CheckRun:
       type: object
       additionalProperties: false
@@ -2114,13 +2238,15 @@ components:
             - running
             - succeeded
             - failed
+            - needs_info
         attempt:
           type: integer
           minimum: 1
         result:
-          type: object
-          additionalProperties: true
-          description: Нормализованный результат; схема источника согласуется отдельно.
+          oneOf:
+            - $ref: '#/components/schemas/FnsCheckResult'
+            - $ref: '#/components/schemas/BkiCheckResult'
+          description: Только для succeeded; схема обязана соответствовать source. Техническая ошибка и недостаточность входа представлены внутренним адаптером по BACKEND_RULES.md, а не этим результатом.
         error_code:
           type: string
         retryable:
@@ -2152,10 +2278,14 @@ components:
           format: uuid
         model_version:
           type: string
+          const: stub-v1
         score:
-          type: number
+          type: integer
+          minimum: 0
+          maximum: 100
         scale:
           type: string
+          const: risk_0_100_higher_is_riskier
         factors:
           type: array
           items:
@@ -2163,8 +2293,7 @@ components:
         created_at:
           type: string
           format: date-time
-      description: Сохранённая оценка риска для банковского рассмотрения; устройство заглушки описано в ARCHITECTURE.md.
-      description: Синтетический результат заглушки скоринга. Версия модели - stub-v1; результат не является кредитным решением. После успешной оценки заявка направляется на ручное рассмотрение. Окончательные поля и шкала реального скоринга согласуются позднее.
+      description: Синтетическая оценка риска по BACKEND_RULES.md. model_version=stub-v1; score — целое число 0..100, больший балл означает больший риск; scale=risk_0_100_higher_is_riskier. Результат не является кредитным решением; после успеха заявка направляется в ManualReview.
       required:
         - id
         - snapshot_id
@@ -2233,6 +2362,7 @@ components:
             - checks
             - scoring
             - decision
+            - disbursement
         status:
           type: string
           enum:
@@ -2251,8 +2381,7 @@ components:
           type: string
         retry_available:
           type: boolean
-      description: Техническая ошибка сохраняет бизнес-статус заявки. retry_available определяет возможность ручного
-        возобновления обработки.
+      description: Технический статус обработки текущего снимка по BACKEND_RULES.md. decision/completed означает готовность к ручному рассмотрению или его завершение. disbursement используется в Signed/Disbursed. Техническая ошибка сохраняет бизнес-статус; retry_available=true только при blocked в Checking, Scoring или Signed, без активного задания. attempt — число начатых вызовов текущего шага, включая ручные повторы; next_retry_at есть только при retry_scheduled, error_code — только при технической ошибке.
       required:
         - stage
         - status
@@ -2341,6 +2470,7 @@ components:
           items:
             type: string
             minLength: 1
+          minItems: 1
         internal_comment:
           type: string
           minLength: 1
@@ -2370,6 +2500,7 @@ components:
           items:
             type: string
             minLength: 1
+          minItems: 1
         internal_comment:
           type: string
           minLength: 1
@@ -2555,29 +2686,6 @@ components:
         - limit
         - offset
         - total
-    BankApplicationPage:
-      type: object
-      additionalProperties: false
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/BankApplication'
-        limit:
-          type: integer
-          minimum: 1
-          maximum: 100
-        offset:
-          type: integer
-          minimum: 0
-        total:
-          type: integer
-          minimum: 0
-      required:
-        - items
-        - limit
-        - offset
-        - total
   parameters:
     Limit:
       name: limit
@@ -2653,6 +2761,39 @@ components:
         format: uuid
       example: 77777777-7777-4777-8777-777777777777
   responses:
+    AuthBadRequest:
+      description: Неверный формат запроса или ошибка валидации данных.
+      headers:
+        Cache-Control:
+          schema:
+            type: string
+            const: no-store
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    AuthUnauthorized:
+      description: Отсутствует или недействителен токен; для login — неверные учётные данные.
+      headers:
+        Cache-Control:
+          schema:
+            type: string
+            const: no-store
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    AuthUnavailable:
+      description: Сервис временно недоступен.
+      headers:
+        Cache-Control:
+          schema:
+            type: string
+            const: no-store
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     BadRequest:
       description: Неверный формат запроса или ошибка валидации данных.
       content:
