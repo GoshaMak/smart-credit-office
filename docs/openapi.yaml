@@ -1,0 +1,2727 @@
+openapi: 3.1.0
+info:
+  title: Кредитный кабинет предпринимателя - Backend API
+  version: 0.1.0
+  description: |-
+    HTTP-контракт кредитного кабинета. Стек, обработка заявок, устройство сессий и локальных заглушек описаны в [ARCHITECTURE.md](ARCHITECTURE.md).
+
+    Все идентификаторы - UUID, время - UTC в формате RFC 3339, деньги - десятичные строки RUB. Необязательные поля ответа отсутствуют, если значения нет; null не используется. Списки сортируются по created_at DESC, id DESC (продукты - по code ASC, id ASC). При параллельных изменениях offset-пагинация не обеспечивает снимок списка.
+
+    Клиентские операции доступны роли client; /bank/* - bank_employee. GET /products, /products/{product_id}, /auth/me доступны обеим ролям. Клиент видит только компании своего членства и их заявки/документы.
+
+    Каждая мутация существующей заявки принимает expected_version. Несовпадение возвращает 409. В ответах команд возвращается состояние на момент фиксации, worker может сразу его изменить. Изменения данных, документов и уточнений увеличивают версию заявки.
+
+    Ответы всех auth-операций имеют Cache-Control: no-store.
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Локальная разработка; адрес и порт предварительные.
+tags:
+  - name: Auth
+    description: Аутентификация
+  - name: Companies
+    description: Компании клиента
+  - name: Products
+    description: Кредитные продукты
+  - name: Applications
+    description: Заявки клиента
+  - name: Documents
+    description: Документы заявки
+  - name: Information
+    description: Уточнение данных
+  - name: Offers
+    description: Предложения условий
+  - name: Bank
+    description: Рабочее место сотрудника банка
+  - name: Health
+    description: Работоспособность
+security:
+  - bearerAuth: []
+paths:
+  /auth/login:
+    post:
+      tags:
+        - Auth
+      operationId: login
+      summary: Вход
+      responses:
+        '200':
+          description: Операция выполнена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              login: login
+              password: password
+  /auth/refresh:
+    post:
+      tags:
+        - Auth
+      operationId: refreshTokens
+      summary: Обновить токены с ротацией refresh token
+      description: |-
+        Погашает переданный refresh token и создаёт новый. История хешей погашенных
+        токенов сохраняется до истечения сессии для обнаружения повторного использования.
+        Повторное использование отзывает всю сессию, включая уже выданные новые токены, и возвращает 401.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+            example:
+              refresh_token: refresh-token
+      responses:
+        '200':
+          description: Новая пара токенов.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid:
+                  value:
+                    message: Refresh token недействителен или истёк.
+                    details: []
+                reused:
+                  value:
+                    message: Повторное использование refresh token.
+                    details: []
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /auth/logout:
+    post:
+      tags:
+        - Auth
+      operationId: logout
+      summary: Отозвать сессию и токены
+      description: Отзывает сессию переданного refresh token и все её токены, включая access JWT; другие сессии пользователя остаются активными.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+            example:
+              refresh_token: refresh-token
+      responses:
+        '204':
+          description: Сессия отозвана или недействительна.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /auth/me:
+    get:
+      tags:
+        - Auth
+      operationId: getCurrentUser
+      summary: Текущий пользователь и членство
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /products:
+    get:
+      tags:
+        - Products
+      operationId: listProducts
+      summary: Получить активные продукты
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+  /products/{product_id}:
+    get:
+      tags:
+        - Products
+      operationId: getProduct
+      summary: Информация о продукте
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/product_id'
+  /companies:
+    get:
+      tags:
+        - Companies
+      operationId: listCompanies
+      summary: Получить доступные компании
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Company'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      tags:
+        - Companies
+      operationId: createCompany
+      summary: Создать компанию
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Company'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Создатель становится owner. ИНН уникален; для ИП 12 цифр, для юридического лица 10.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompanyCreate'
+            example:
+              legal_type: legal_entity
+              inn: '0000000000'
+              name: ООО Компания
+              registration_date: '2020-01-15'
+              okved: '47.91'
+              address: Город А, Улица Б, д. 6, к. 7
+  /companies/{company_id}:
+    get:
+      tags:
+        - Companies
+      operationId: getCompany
+      summary: Получить профиль компании
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Company'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/company_id'
+    patch:
+      tags:
+        - Companies
+      operationId: updateCompany
+      summary: Изменить профиль компании
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Company'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Только owner.
+      parameters:
+        - $ref: '#/components/parameters/company_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompanyUpdate'
+            example:
+              expected_version: 1
+              legal_type: legal_entity
+              name: ООО Компания
+              registration_date: '2020-01-15'
+              okved: '47.91'
+              address: Город А, Улица Б, д. 6, к. 7
+  /applications:
+    get:
+      tags:
+        - Applications
+      operationId: listApplications
+      summary: Получить заявки доступных компаний
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: company_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+          example: 11111111-1111-4111-8111-111111111111
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ApplicationStatus'
+          example: Draft
+    post:
+      tags:
+        - Applications
+      operationId: createApplication
+      summary: Создать черновик
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplicationCreate'
+            example:
+              company_id: 11111111-1111-4111-8111-111111111111
+              data:
+                product_id: 22222222-2222-4222-8222-222222222222
+                amount: '1200000.00'
+                term_months: 18
+                purpose: Закупка товарных запасов и пополнение оборотных средств интернет-магазина
+                financials:
+                  as_of_date: '2026-10-01'
+                  monthly_revenue: '1500000.00'
+                  monthly_expenses: '900000.00'
+                  outstanding_debt: '500000.00'
+                  monthly_debt_payments: '50000.00'
+  /applications/{application_id}:
+    get:
+      tags:
+        - Applications
+      operationId: getApplication
+      summary: Получить состояние заявки
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+    patch:
+      tags:
+        - Applications
+      operationId: updateApplication
+      summary: Изменить данные черновика
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplicationUpdate'
+            example:
+              expected_version: 1
+              data:
+                amount: '1200000.00'
+                term_months: 18
+                purpose: Закупка товарных запасов и пополнение оборотных средств интернет-магазина
+                financials:
+                  as_of_date: '2026-10-01'
+                  monthly_revenue: '1500000.00'
+                  monthly_expenses: '900000.00'
+                  outstanding_debt: '500000.00'
+                  monthly_debt_payments: '50000.00'
+  /applications/{application_id}/submit:
+    post:
+      tags:
+        - Applications
+      operationId: submitApplication
+      summary: Подать заявку
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Проверяет данные, документы и продукт; создаёт снимок, событие и задание, переводит в Submitted.
+        Фиксируется подтверждение согласий.
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitRequest'
+            example:
+              expected_version: 3
+              consents:
+                credit_history: true
+                data_processing: true
+  /applications/{application_id}/events:
+    get:
+      tags:
+        - Applications
+      operationId: listApplicationEvents
+      summary: История заявки
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+  /applications/{application_id}/sign:
+    post:
+      tags:
+        - Applications
+      operationId: signApplication
+      summary: Подписание заявки сотрудником компании
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionCommand'
+            example:
+              expected_version: 13
+  /applications/{application_id}/documents:
+    get:
+      tags:
+        - Documents
+      operationId: listDocuments
+      summary: Получить документы заявки
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+    post:
+      tags:
+        - Documents
+      operationId: uploadDocument
+      summary: Загрузить документ
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentMutation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Не более 10 MiB; application/pdf, image/jpeg, image/png.
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DocumentUpload'
+            example:
+              expected_version: 2
+              document_type: financial_statement
+              file: <binary contents of financial-statement-2026-09.pdf>
+  /applications/{application_id}/documents/{document_id}:
+    delete:
+      tags:
+        - Documents
+      operationId: deleteDocument
+      summary: Удалить документ
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Документ, включённый хотя бы в один снимок, удалять нельзя.
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/document_id'
+        - name: expected_version
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+          required: true
+          example: 3
+  /applications/{application_id}/documents/{document_id}/content:
+    get:
+      tags:
+        - Documents
+      operationId: downloadDocument
+      summary: Скачать документ
+      responses:
+        '200':
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Доступ клиенту компании и сотруднику банка. Имя файла передаётся в Content-Disposition.
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/document_id'
+  /applications/{application_id}/information-requests:
+    get:
+      tags:
+        - Information
+      operationId: listInformationRequests
+      summary: Получить запросы уточнений
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InformationRequestPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+  /applications/{application_id}/information-requests/{request_id}/answer:
+    post:
+      tags:
+        - Information
+      operationId: answerInformationRequest
+      summary: Ответить на запрос уточнений
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/request_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InformationAnswerCommand'
+            example:
+              expected_version: 10
+              answer:
+                comment: Уточнены финансовые показатели и действующие обязательства. Приложены финансовая отчётность
+                  и справка о задолженности.
+                data:
+                  product_id: 22222222-2222-4222-8222-222222222222
+                  amount: '1200000.00'
+                  term_months: 18
+                  purpose: Закупка товарных запасов и пополнение оборотных средств интернет-магазина
+                  financials:
+                    as_of_date: '2026-10-01'
+                    monthly_revenue: '1500000.00'
+                    monthly_expenses: '900000.00'
+                    outstanding_debt: '500000.00'
+                    monthly_debt_payments: '50000.00'
+                document_ids:
+                  - 44444444-4444-4444-8444-444444444444
+                  - 88888888-8888-4888-8888-888888888888
+  /applications/{application_id}/offers:
+    get:
+      tags:
+        - Offers
+      operationId: listOffers
+      summary: Предложенные условия
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OfferPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+  /applications/{application_id}/offers/{offer_id}/accept:
+    post:
+      tags:
+        - Offers
+      operationId: acceptOffer
+      summary: Принять предложение
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/offer_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionCommand'
+            example:
+              expected_version: 12
+  /applications/{application_id}/offers/{offer_id}/decline:
+    post:
+      tags:
+        - Offers
+      operationId: declineOffer
+      summary: Отклонить предложение
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/offer_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionCommand'
+            example:
+              expected_version: 12
+  /bank/applications:
+    get:
+      tags:
+        - Bank
+      operationId: listBankApplications
+      summary: Получить очередь заявок
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplicationPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Черновики не входят в ответ. Детали доступны отдельным запросом.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: company_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+          example: 11111111-1111-4111-8111-111111111111
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ApplicationStatus'
+          example: Checking
+        - name: processing_status
+          in: query
+          schema:
+            type: string
+            enum:
+              - queued
+              - running
+              - retry_scheduled
+              - blocked
+              - completed
+          example: blocked
+  /bank/applications/{application_id}:
+    get:
+      tags:
+        - Bank
+      operationId: getBankApplication
+      summary: Заявка с результатами проверок и скоринга
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankApplication'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: checks и scoring_result относятся к current_snapshot_id; decisions содержит историю решений с
+        их snapshot_id.
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+  /bank/applications/{application_id}/snapshots:
+    get:
+      tags:
+        - Bank
+      operationId: listApplicationSnapshots
+      summary: Получить версии данных рассмотрения
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+  /bank/applications/{application_id}/snapshots/{snapshot_id}:
+    get:
+      tags:
+        - Bank
+      operationId: getApplicationSnapshot
+      summary: Получить снимок
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Snapshot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Снимок должен принадлежать указанной заявке.
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/snapshot_id'
+  /bank/applications/{application_id}/documents:
+    get:
+      tags:
+        - Bank
+      operationId: listBankDocuments
+      summary: Получить документы рассматриваемой заявки
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+  /bank/applications/{application_id}/information-requests:
+    get:
+      tags:
+        - Bank
+      operationId: listBankInformationRequests
+      summary: Получить запросы и ответы клиента
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InformationRequestPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+    post:
+      tags:
+        - Bank
+      operationId: requestInformation
+      summary: Запросить уточнения у клиента
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InformationRequestMutation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InformationRequestCreate'
+            example:
+              expected_version: 8
+              message: Уточните остаток задолженности и ежемесячные платежи по действующим кредитам. Приложите финансовую
+                отчётность и справку о задолженности.
+              requested_fields:
+                - /financials/outstanding_debt
+                - /financials/monthly_debt_payments
+              required_document_types:
+                - financial_statement
+                - debt_statement
+  /bank/applications/{application_id}/approve:
+    post:
+      tags:
+        - Bank
+      operationId: approveApplication
+      summary: Принять ручное решение и предложить условия
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankApplication'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveRequest'
+            example:
+              expected_version: 11
+              terms:
+                product_id: 22222222-2222-4222-8222-222222222222
+                amount: '800000.00'
+                currency: RUB
+                term_months: 12
+                annual_rate_percent: '18.50'
+                conditions:
+                  - 'Целевое использование: закупка товарных запасов'
+                  - Погашение ежемесячными платежами
+              reason_codes:
+                - MANUAL_APPROVAL
+                - REDUCED_AMOUNT
+              internal_comment: Заглушки проверок и скоринга завершены. С учётом долговой нагрузки одобрена сумма 800000.00
+                RUB на 12 месяцев вместо запрошенных 1200000.00 RUB на 18 месяцев.
+              client_message: Готовы предложить 800000 рублей на 12 месяцев по ставке 18.50% годовых. Ознакомьтесь
+                с условиями предложения в кабинете.
+  /bank/applications/{application_id}/reject:
+    post:
+      tags:
+        - Bank
+      operationId: rejectApplication
+      summary: Отклонить заявку
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankApplication'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Только ManualReview. Сохраняет CreditDecision и переводит в Rejected. Клиент видит только client_message.
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectRequest'
+            example:
+              expected_version: 11
+              reason_codes:
+                - HIGH_DEBT_BURDEN
+              internal_comment: По синтетическим данным заглушек проверок и скоринга сотрудник считает, что долговая нагрузка превышает допустимое значение
+                демонстрационной кредитной политики.
+              client_message: 'По результатам рассмотрения предоставить финансирование сейчас не можем. Причина:
+                высокая текущая долговая нагрузка.'
+  /bank/applications/{application_id}/retry-processing:
+    post:
+      tags:
+        - Bank
+      operationId: retryApplicationProcessing
+      summary: Возобновить обработку после технического сбоя
+      responses:
+        '202':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankApplication'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Создаёт задание для текущего снимка, без произвольного изменения бизнес-статуса. Нельзя перезапустить
+        завершённую заявку или получить иной результат успешного скоринга этой командой.
+      parameters:
+        - $ref: '#/components/parameters/application_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionCommand'
+            example:
+              expected_version: 6
+  /health/live:
+    get:
+      tags:
+        - Health
+      operationId: liveness
+      summary: Проверить работу
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+      description: Не проверяет внешние источники и БД.
+      security: []
+  /health/ready:
+    get:
+      tags:
+        - Health
+      operationId: readiness
+      summary: Проверить готовность
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      description: Проверяет подключение к БД и применённые миграции. Временный сбой ФНС/БКИ не означает неготовность
+        API.
+      security: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Amount:
+      type: string
+      pattern: ^(0|[1-9][0-9]{0,14})\.[0-9]{2}$
+      examples:
+        - '1000000.00'
+      description: Десятичное значение в рублях, ровно два знака после точки.
+    ApplicationStatus:
+      type: string
+      enum:
+        - Draft
+        - Submitted
+        - Checking
+        - NeedsInfo
+        - Scoring
+        - ManualReview
+        - Offered
+        - Rejected
+        - Accepted
+        - Declined
+        - Signed
+        - Disbursed
+    ApplicationAction:
+      type: string
+      enum:
+        - edit
+        - upload_document
+        - delete_document
+        - submit
+        - answer_information_request
+        - accept_offer
+        - decline_offer
+        - sign
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      properties:
+        field:
+          type: string
+        message:
+          type: string
+      required:
+        - message
+    Error:
+      type: object
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+      description: Единый формат ошибок, включая ошибки валидации.
+      required:
+        - message
+        - details
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        login:
+          type: string
+          minLength: 1
+          maxLength: 254
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          format: password
+          writeOnly: true
+      required:
+        - login
+        - password
+    RefreshTokenRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        refresh_token:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          writeOnly: true
+          description: Непрозрачный секрет сессии, выданный при входе или последнем обновлении.
+      required:
+        - refresh_token
+    TokenResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        access_token:
+          type: string
+          minLength: 1
+          description: JWT для защищённых операций API; содержит идентификатор сессии sid.
+        refresh_token:
+          type: string
+          minLength: 1
+          description: Одноразовый непрозрачный токен обновления. После ротации заменяется новым.
+      required:
+        - access_token
+        - refresh_token
+    User:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+        role:
+          type: string
+          enum:
+            - client
+            - bank_employee
+      required:
+        - id
+        - display_name
+        - role
+    Membership:
+      type: object
+      additionalProperties: false
+      properties:
+        company_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum:
+            - owner
+            - representative
+      required:
+        - company_id
+        - role
+    CurrentUser:
+      type: object
+      additionalProperties: false
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        memberships:
+          type: array
+          items:
+            $ref: '#/components/schemas/Membership'
+      required:
+        - user
+        - memberships
+    CompanyCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        legal_type:
+          type: string
+          enum:
+            - legal_entity
+            - individual_entrepreneur
+        inn:
+          type: string
+          pattern: ^([0-9]{10}|[0-9]{12})$
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
+        registration_date:
+          type: string
+          format: date
+        okved:
+          type: string
+          minLength: 2
+          maxLength: 16
+        address:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      required:
+        - legal_type
+        - inn
+        - name
+        - registration_date
+        - okved
+        - address
+    CompanyUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        legal_type:
+          type: string
+          enum:
+            - legal_entity
+            - individual_entrepreneur
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
+        registration_date:
+          type: string
+          format: date
+        okved:
+          type: string
+          minLength: 2
+          maxLength: 16
+        address:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      description: 'PATCH: отсутствующие поля сохраняются, null не принимается. ИНН после создания неизменяем.'
+      minProperties: 2
+      required:
+        - expected_version
+    Company:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        legal_type:
+          type: string
+          enum:
+            - legal_entity
+            - individual_entrepreneur
+        inn:
+          type: string
+          pattern: ^([0-9]{10}|[0-9]{12})$
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
+        registration_date:
+          type: string
+          format: date
+        okved:
+          type: string
+          minLength: 2
+          maxLength: 16
+        address:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - version
+        - legal_type
+        - inn
+        - name
+        - registration_date
+        - okved
+        - address
+        - created_at
+        - updated_at
+    Product:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        currency:
+          type: string
+          enum:
+            - RUB
+        min_amount:
+          $ref: '#/components/schemas/Amount'
+        max_amount:
+          $ref: '#/components/schemas/Amount'
+        min_term_months:
+          type: integer
+          minimum: 1
+        max_term_months:
+          type: integer
+          minimum: 1
+        required_document_types:
+          type: array
+          items:
+            type: string
+        required_application_fields:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+      description: Поддерживаются любые продукты, описанные параметрами каталога; фиксированного набора и числа продуктов нет. Каталог задаётся конфигурацией/начальными данными. required_application_fields
+        содержит JSON Pointer относительно LoanInput; при подаче требования повторно проверяются сервером.
+      required:
+        - id
+        - code
+        - name
+        - description
+        - currency
+        - min_amount
+        - max_amount
+        - min_term_months
+        - max_term_months
+        - required_document_types
+        - required_application_fields
+        - active
+    Financials:
+      type: object
+      additionalProperties: false
+      properties:
+        as_of_date:
+          type: string
+          format: date
+        monthly_revenue:
+          $ref: '#/components/schemas/Amount'
+        monthly_expenses:
+          $ref: '#/components/schemas/Amount'
+        outstanding_debt:
+          $ref: '#/components/schemas/Amount'
+        monthly_debt_payments:
+          $ref: '#/components/schemas/Amount'
+      description: Минимальный набор показателей для API заявки.
+      required:
+        - as_of_date
+        - monthly_revenue
+        - monthly_expenses
+        - outstanding_debt
+        - monthly_debt_payments
+    LoanInput:
+      type: object
+      additionalProperties: false
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        amount:
+          $ref: '#/components/schemas/Amount'
+        term_months:
+          type: integer
+          minimum: 1
+          maximum: 600
+        purpose:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        financials:
+          $ref: '#/components/schemas/Financials'
+      description: Данные черновика могут быть неполными. Обязательность полей и ограничения продукта проверяются при подаче.
+    LoanUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        amount:
+          $ref: '#/components/schemas/Amount'
+        term_months:
+          type: integer
+          minimum: 1
+          maximum: 600
+        purpose:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        financials:
+          $ref: '#/components/schemas/Financials'
+      description: Изменяемые поля черновика заявки. financials при передаче заменяется целиком.
+    ApplicationCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        company_id:
+          type: string
+          format: uuid
+        data:
+          $ref: '#/components/schemas/LoanInput'
+      required:
+        - company_id
+        - data
+    ApplicationUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        data:
+          $ref: '#/components/schemas/LoanUpdate'
+      description: data - частичное обновление полей LoanUpdate; financials при передаче заменяется
+        целиком. null не очищает поля и отклоняется.
+      required:
+        - expected_version
+        - data
+    PublicDecision:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        outcome:
+          type: string
+          enum:
+            - offer
+            - reject
+        message:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        decided_at:
+          type: string
+          format: date-time
+      description: Сообщение для клиента, без внутренних факторов риска и комментариев сотрудника.
+      required:
+        - id
+        - outcome
+        - message
+        - decided_at
+    Application:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        company_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ApplicationStatus'
+        version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        data:
+          $ref: '#/components/schemas/LoanInput'
+        current_snapshot_id:
+          type: string
+          format: uuid
+        available_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApplicationAction'
+        decision:
+          $ref: '#/components/schemas/PublicDecision'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      description: current_snapshot_id и decision отсутствуют до появления соответствующих данных. Версию следует
+        перечитывать.
+      required:
+        - id
+        - company_id
+        - status
+        - version
+        - data
+        - available_actions
+        - created_at
+        - updated_at
+    VersionCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+      required:
+        - expected_version
+    Consent:
+      type: object
+      additionalProperties: false
+      properties:
+        credit_history:
+          type: boolean
+          const: true
+        data_processing:
+          type: boolean
+          const: true
+      description: Подтверждение согласий внутри продукта.
+      required:
+        - credit_history
+        - data_processing
+    SubmitRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        consents:
+          $ref: '#/components/schemas/Consent'
+      required:
+        - expected_version
+        - consents
+    Document:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        application_id:
+          type: string
+          format: uuid
+        document_type:
+          type: string
+        filename:
+          type: string
+        content_type:
+          type: string
+        size_bytes:
+          type: integer
+          minimum: 1
+        uploaded_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - application_id
+        - document_type
+        - filename
+        - content_type
+        - size_bytes
+        - uploaded_at
+    DocumentUpload:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        document_type:
+          type: string
+          minLength: 1
+          maxLength: 100
+        file:
+          type: string
+          format: binary
+      required:
+        - expected_version
+        - document_type
+        - file
+    DocumentMutation:
+      type: object
+      additionalProperties: false
+      properties:
+        document:
+          $ref: '#/components/schemas/Document'
+        application_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+      required:
+        - document
+        - application_version
+    InformationAnswer:
+      type: object
+      additionalProperties: false
+      properties:
+        comment:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        data:
+          $ref: '#/components/schemas/LoanInput'
+        document_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+      description: data изменяет данные LoanInput по правилам ApplicationUpdate. document_ids ссылается только на
+        документы этой заявки.
+      required:
+        - comment
+        - document_ids
+    InformationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        application_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - open
+            - answered
+        message:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        requested_fields:
+          type: array
+          items:
+            type: string
+        required_document_types:
+          type: array
+          items:
+            type: string
+        answer:
+          $ref: '#/components/schemas/InformationAnswer'
+        created_at:
+          type: string
+          format: date-time
+        answered_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - application_id
+        - status
+        - message
+        - requested_fields
+        - required_document_types
+        - created_at
+    InformationAnswerCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        answer:
+          $ref: '#/components/schemas/InformationAnswer'
+      required:
+        - expected_version
+        - answer
+    InformationRequestCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        requested_fields:
+          type: array
+          items:
+            type: string
+        required_document_types:
+          type: array
+          items:
+            type: string
+      description: Только ManualReview; создаёт один открытый запрос и переводит заявку в NeedsInfo. requested_fields
+        - JSON Pointer относительно LoanInput. Клиенту не передаются внутренние комментарии.
+      required:
+        - expected_version
+        - message
+        - requested_fields
+        - required_document_types
+    InformationRequestMutation:
+      type: object
+      additionalProperties: false
+      properties:
+        information_request:
+          $ref: '#/components/schemas/InformationRequest'
+        application:
+          $ref: '#/components/schemas/Application'
+      required:
+        - information_request
+        - application
+    OfferTerms:
+      type: object
+      additionalProperties: false
+      properties:
+        product_id:
+          type: string
+          format: uuid
+        amount:
+          $ref: '#/components/schemas/Amount'
+        currency:
+          type: string
+          enum:
+            - RUB
+        term_months:
+          type: integer
+          minimum: 1
+          maximum: 600
+        annual_rate_percent:
+          type: string
+          pattern: ^(0|[1-9][0-9]{0,2})\.[0-9]{2}$
+          examples:
+            - '18.50'
+        conditions:
+          type: array
+          items:
+            type: string
+      description: Проверяется соответствие продукту и актуальному решению; ставка - годовой процент с двумя знаками
+        после точки.
+      required:
+        - product_id
+        - amount
+        - currency
+        - term_months
+        - annual_rate_percent
+        - conditions
+    Offer:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        application_id:
+          type: string
+          format: uuid
+        decision_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - pending
+            - accepted
+            - declined
+        terms:
+          $ref: '#/components/schemas/OfferTerms'
+        created_at:
+          type: string
+          format: date-time
+        responded_at:
+          type: string
+          format: date-time
+      description: Одно действующее предложение на заявку; альтернативные условия представлены изменёнными terms.
+      required:
+        - id
+        - application_id
+        - decision_id
+        - status
+        - terms
+        - created_at
+    Event:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        application_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        status:
+          $ref: '#/components/schemas/ApplicationStatus'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        actor_type:
+          type: string
+          enum:
+            - client
+            - bank_employee
+            - system
+        created_at:
+          type: string
+          format: date-time
+      description: Клиентская история, без внутренних данных аудита.
+      required:
+        - id
+        - application_id
+        - type
+        - status
+        - message
+        - actor_type
+        - created_at
+    Snapshot:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        application_id:
+          type: string
+          format: uuid
+        revision:
+          type: integer
+          minimum: 1
+        company:
+          $ref: '#/components/schemas/Company'
+        data:
+          $ref: '#/components/schemas/LoanInput'
+        document_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        created_at:
+          type: string
+          format: date-time
+      description: Неизменяемый вход рассмотрения. Документы снимка нельзя удалить или перезаписать; замена - новый
+        документ и снимок.
+      required:
+        - id
+        - application_id
+        - revision
+        - company
+        - data
+        - document_ids
+        - created_at
+    CheckRun:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        snapshot_id:
+          type: string
+          format: uuid
+        source:
+          type: string
+          enum:
+            - fns
+            - bki
+        status:
+          type: string
+          enum:
+            - pending
+            - running
+            - succeeded
+            - failed
+        attempt:
+          type: integer
+          minimum: 1
+        result:
+          type: object
+          additionalProperties: true
+          description: Нормализованный результат; схема источника согласуется отдельно.
+        error_code:
+          type: string
+        retryable:
+          type: boolean
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - snapshot_id
+        - source
+        - status
+        - attempt
+    ScoringResult:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        snapshot_id:
+          type: string
+          format: uuid
+        request_id:
+          type: string
+          format: uuid
+        model_version:
+          type: string
+        score:
+          type: number
+        scale:
+          type: string
+        factors:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+      description: Сохранённая оценка риска для банковского рассмотрения; устройство заглушки описано в ARCHITECTURE.md.
+      description: Синтетический результат заглушки скоринга. Версия модели - stub-v1; результат не является кредитным решением. После успешной оценки заявка направляется на ручное рассмотрение. Окончательные поля и шкала реального скоринга согласуются позднее.
+      required:
+        - id
+        - snapshot_id
+        - request_id
+        - model_version
+        - score
+        - scale
+        - factors
+        - created_at
+    CreditDecision:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        snapshot_id:
+          type: string
+          format: uuid
+        outcome:
+          type: string
+          enum:
+            - offer
+            - reject
+        source:
+          type: string
+          enum:
+            - manual
+        policy_version:
+          type: string
+        reason_codes:
+          type: array
+          items:
+            type: string
+        internal_comment:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        client_message:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        author_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - snapshot_id
+        - outcome
+        - source
+        - policy_version
+        - reason_codes
+        - client_message
+        - author_id
+        - created_at
+    ProcessingStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        stage:
+          type: string
+          enum:
+            - checks
+            - scoring
+            - decision
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - retry_scheduled
+            - blocked
+            - completed
+        attempt:
+          type: integer
+          minimum: 0
+        next_retry_at:
+          type: string
+          format: date-time
+        error_code:
+          type: string
+        retry_available:
+          type: boolean
+      description: Техническая ошибка сохраняет бизнес-статус заявки. retry_available определяет возможность ручного
+        возобновления обработки.
+      required:
+        - stage
+        - status
+        - attempt
+        - retry_available
+    BankApplication:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        company_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ApplicationStatus'
+        version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        data:
+          $ref: '#/components/schemas/LoanInput'
+        current_snapshot_id:
+          type: string
+          format: uuid
+        available_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApplicationAction'
+        decision:
+          $ref: '#/components/schemas/PublicDecision'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        processing:
+          $ref: '#/components/schemas/ProcessingStatus'
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckRun'
+        scoring_result:
+          $ref: '#/components/schemas/ScoringResult'
+        decisions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CreditDecision'
+        available_bank_actions:
+          type: array
+          items:
+            type: string
+            enum:
+              - request_information
+              - approve
+              - reject
+              - retry_processing
+      description: Только bank_employee. processing и scoring_result отсутствуют, пока не созданы. Внутренние данные
+        не возвращаются клиентскими операциями.
+      required:
+        - id
+        - company_id
+        - status
+        - version
+        - data
+        - available_actions
+        - created_at
+        - updated_at
+        - checks
+        - decisions
+        - available_bank_actions
+    ApproveRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        terms:
+          $ref: '#/components/schemas/OfferTerms'
+        reason_codes:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        internal_comment:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        client_message:
+          type: string
+          minLength: 1
+          maxLength: 4000
+      description: Только ManualReview. Фиксирует ручное решение и создаёт предложение атомарно. Обязательные проверки
+        и скоринг должны быть завершены; обход через этот метод запрещён.
+      required:
+        - expected_version
+        - terms
+        - reason_codes
+        - internal_comment
+        - client_message
+    RejectRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          minimum: 1
+          description: Версия агрегата. Увеличивается при каждом изменении, включая действия worker.
+        reason_codes:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        internal_comment:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        client_message:
+          type: string
+          minLength: 1
+          maxLength: 4000
+      description: Только ManualReview. Внутренние причины и комментарий доступны только сотрудникам.
+      required:
+        - expected_version
+        - reason_codes
+        - internal_comment
+        - client_message
+    Health:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+      required:
+        - status
+    ProductPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Product'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      required:
+        - items
+        - limit
+        - offset
+        - total
+    ApplicationPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Application'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      required:
+        - items
+        - limit
+        - offset
+        - total
+    DocumentPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Document'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      required:
+        - items
+        - limit
+        - offset
+        - total
+    InformationRequestPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InformationRequest'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      required:
+        - items
+        - limit
+        - offset
+        - total
+    OfferPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Offer'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      required:
+        - items
+        - limit
+        - offset
+        - total
+    EventPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      required:
+        - items
+        - limit
+        - offset
+        - total
+    SnapshotPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Snapshot'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      required:
+        - items
+        - limit
+        - offset
+        - total
+    BankApplicationPage:
+      type: object
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BankApplication'
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+      required:
+        - items
+        - limit
+        - offset
+        - total
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      example: 20
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+      example: 0
+    company_id:
+      name: company_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 11111111-1111-4111-8111-111111111111
+    product_id:
+      name: product_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 22222222-2222-4222-8222-222222222222
+    application_id:
+      name: application_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 33333333-3333-4333-8333-333333333333
+    document_id:
+      name: document_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 44444444-4444-4444-8444-444444444444
+    request_id:
+      name: request_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 55555555-5555-4555-8555-555555555555
+    offer_id:
+      name: offer_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 66666666-6666-4666-8666-666666666666
+    snapshot_id:
+      name: snapshot_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 77777777-7777-4777-8777-777777777777
+  responses:
+    BadRequest:
+      description: Неверный формат запроса или ошибка валидации данных.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Неверный формат запроса или ошибка валидации данных.
+            details: []
+    Unauthorized:
+      description: Отсутствует / недействителен / истёк JWT; для login - неверные учётные данные.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Отсутствует / недействителен / истёк JWT; для login - неверные учётные данные. 
+            details: []
+    Forbidden:
+      description: Роль или действие не разрешены.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Роль или действие не разрешены.
+            details: []
+    NotFound:
+      description: Объект не найден или недоступен пользователю.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Объект не найден или недоступен пользователю.
+            details: []
+    Conflict:
+      description: Конфликт версии, состояния заявки или уникальности данных.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Конфликт версии, состояния заявки или уникальности данных.
+            details: []
+    PayloadTooLarge:
+      description: Превышен допустимый размер файла.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Превышен допустимый размер файла.
+            details: []
+    UnsupportedMediaType:
+      description: Тип содержимого не поддерживается.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Тип содержимого не поддерживается.
+            details: []
+    Unavailable:
+      description: Сервис не готов или временно недоступен.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Сервис не готов или временно недоступен.
+            details: []
