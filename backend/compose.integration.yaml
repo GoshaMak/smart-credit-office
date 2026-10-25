@@ -1,0 +1,33 @@
+# Disposable local services for backend/tests/test_database_integration.py.
+# Use a unique Compose project and remove it with `down` after the test run.
+services:
+  postgres:
+    image: postgres:16.15@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+    environment:
+      POSTGRES_DB: credit_test
+      POSTGRES_USER: credit_test
+      POSTGRES_PASSWORD: credit-test-local-only
+    ports:
+      - "127.0.0.1:55443:5432"
+    tmpfs:
+      - /var/lib/postgresql/data:rw,size=1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U credit_test -d credit_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  localstack:
+    image: localstack/localstack:4.14.0@sha256:3ebc37595918b8accb852f8048fef2aff047d465167edd655528065b07bc364a
+    environment:
+      SERVICES: s3
+      PERSISTENCE: "0"
+    ports:
+      - "127.0.0.1:4567:4566"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_localstack/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s

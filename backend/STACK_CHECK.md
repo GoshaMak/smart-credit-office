@@ -47,7 +47,7 @@ docker compose -p hackathon-stage0-stackcheck -f backend/compose.stack-check.yam
 
 Именованный volume не создаётся; тестовые данные удаляются вместе с контейнером.
 
-Интеграционные проверки выше были выполнены локально на PostgreSQL `16.15`. Текущий workflow [.github/workflows/contracts.yml](../.github/workflows/contracts.yml) проверяет контракт и его regression cases; PostgreSQL integration job в нём пока нет. Полная CI проверка окружения, генерации и интеграционных тестов относится к этапу 1 плана.
+Интеграционные проверки выше были выполнены локально на PostgreSQL `16.15`. CI проверяет HTTP-контракт и unit suite, затем поднимает выделенные PostgreSQL/S3 сервисы для приёмочных тестов; отдельный быстрый `stack_check` smoke-набор остаётся доступен для ручного запуска командами выше.
 
 Официальные источники: [sqlc configuration and plugins](https://docs.sqlc.dev/en/stable/reference/config.html), [sqlc-gen-python](https://github.com/sqlc-dev/sqlc-gen-python), [SQLAlchemy PostgreSQL asyncio dialect](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#async-with-psycopg), [Psycopg JSON adaptation](https://www.psycopg.org/psycopg3/docs/basic/adapt.html#json-adaptation).
 

@@ -1,0 +1,145 @@
+name: credit-backend
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  init: true
+  restart: unless-stopped
+  environment: &app-environment
+    DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://credit:credit-local-only@postgres:5432/credit}
+    JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in the environment; see README.md}
+    JWT_ISSUER: ${JWT_ISSUER:-credit-backend}
+    JWT_AUDIENCE: ${JWT_AUDIENCE:-credit-api}
+    S3_ENDPOINT: ${S3_ENDPOINT:-http://localstack:4566}
+    S3_BUCKET: ${S3_BUCKET:-credit-documents}
+    S3_REGION: ${S3_REGION:-us-east-1}
+    S3_ACCESS_KEY: ${S3_ACCESS_KEY:-test}
+    S3_SECRET_KEY: ${S3_SECRET_KEY:-test}
+    MOCK_URL: ${MOCK_URL:-http://integration-mock:8001}
+    OPENAPI_PATH: /app/docs/openapi.yaml
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16.15@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-credit}
+      POSTGRES_USER: ${POSTGRES_USER:-credit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-credit-local-only}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    stop_grace_period: 30s
+
+  localstack:
+    image: localstack/localstack:4.14.0@sha256:3ebc37595918b8accb852f8048fef2aff047d465167edd655528065b07bc364a
+    restart: unless-stopped
+    environment:
+      SERVICES: s3
+      PERSISTENCE: "0"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_localstack/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+    stop_grace_period: 30s
+
+  integration-mock:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    init: true
+    restart: unless-stopped
+    environment: *app-environment
+    command: ["uvicorn", "credit.mock:app", "--host", "0.0.0.0", "--port", "8001"]
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/_health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  api:
+    <<: *app
+    command: ["uvicorn", "credit.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "credit.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      integration-mock:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    stop_grace_period: 45s
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["python", "-m", "credit.migrate"]
+
+  seed:
+    <<: *app
+    restart: "no"
+    command: ["python", "-m", "credit.seed"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  cleanup:
+    <<: *app
+    profiles: [tools]
+    restart: "no"
+    command: ["python", "-m", "credit.cleanup"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:

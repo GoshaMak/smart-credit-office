@@ -1,0 +1,49 @@
+name: Backend verification
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
+          python-version: "3.14.4"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Validate OpenAPI and examples
+        run: uv run --project backend --locked python tools/validate_contract.py
+      - name: Check contract regression cases
+        run: uv run --project backend --locked python -m pytest tools/tests
+      - name: Check backend unit and contract suite
+        run: uv run --project backend --locked python -m pytest
+      - name: Start isolated integration services
+        run: docker compose -p credit-backend-integration -f backend/compose.integration.yaml up --detach --wait
+      - name: Apply integration database migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://credit_test:credit-test-local-only@127.0.0.1:55443/credit_test
+        run: uv run --project backend --locked python -m credit.migrate
+      - name: Check PostgreSQL, S3, HTTP and worker integration
+        env:
+          TEST_INTEGRATION: "1"
+          TEST_DATABASE_URL: postgresql+psycopg://credit_test:credit-test-local-only@127.0.0.1:55443/credit_test
+          TEST_DATABASE_CONFIRM: credit_test
+          TEST_S3_ENDPOINT: http://127.0.0.1:4567
+          TEST_DOCUMENT_BUCKET: credit-tests-ci
+        run: uv run --project backend --locked python -m pytest backend/tests/test_database_integration.py
+      - name: Stop isolated integration services
+        if: always()
+        run: docker compose -p credit-backend-integration -f backend/compose.integration.yaml down
+      - name: Build backend runtime image
+        run: docker build --pull -f backend/Dockerfile -t credit-backend:ci .
+      - name: Validate Compose model
+        run: docker compose config --quiet
