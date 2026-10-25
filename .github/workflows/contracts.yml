@@ -20,6 +20,13 @@ jobs:
           python-version: "3.14.4"
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
+      - uses: sqlc-dev/setup-sqlc@v3
+        with:
+          sqlc-version: "1.31.1"
+      - name: Check sqlc generated code is reproducible
+        run: uv run --project backend --locked python backend/scripts/check_codegen.py
+      - name: Lint backend source
+        run: uv run --project backend --locked ruff check backend/src/credit
       - name: Validate OpenAPI and examples
         run: uv run --project backend --locked python tools/validate_contract.py
       - name: Check contract regression cases
@@ -46,4 +53,6 @@ jobs:
       - name: Build backend runtime image
         run: docker build --pull -f backend/Dockerfile -t credit-backend:ci .
       - name: Validate Compose model
+        env:
+          JWT_SECRET: "Y2ktY29tcG9zZS12YWxpZGF0aW9uLXNlY3JldC0zMi1ieXRlcw=="
         run: docker compose config --quiet
