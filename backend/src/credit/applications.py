@@ -14,6 +14,7 @@ from typing import Any
 from credit.common import (
     ApiError,
     application_view,
+    client_application_view,
     audit,
     check_version,
     enqueue,
@@ -190,22 +191,7 @@ class ApplicationService:
                 "product": _product_view(product), "consents": consent_record, "created_at": now()}
 
     async def _client_view(self, store: Any, app: dict) -> dict:
-        result = application_view(app)
-        actions = result["available_actions"]
-        docs = await store.list("documents", application_id=app["id"])
-        snapshots = await store.list("application_snapshots", application_id=app["id"])
-        frozen_ids = {doc_id for snap in snapshots for doc_id in snap.get("document_ids", [])}
-        if not any(doc.get("deleted_at") is None and doc["id"] not in frozen_ids for doc in docs):
-            actions[:] = [action for action in actions if action != "delete_document"]
-        if app.get("status") == "NeedsInfo":
-            requests = await store.list("information_requests", application_id=app["id"], status="open")
-            if not requests:
-                actions[:] = [action for action in actions if action != "answer_information_request"]
-        if app.get("status") == "Offered":
-            offers = await store.list("offers", application_id=app["id"], status="pending")
-            if not offers:
-                actions[:] = [action for action in actions if action not in ("accept_offer", "decline_offer")]
-        return result
+        return await client_application_view(store, app)
 
     async def _events(self, actor: dict, path: dict, query: dict, body: dict) -> dict:
         require_role(actor, *_CLIENT_ROLES)
@@ -377,7 +363,7 @@ class ApplicationService:
             app.pop("processing", None)
             await touch(store, app)
             await event(store, app, actor, "information_requested", "Банк запросил уточнения.")
-            return {"information_request": _public(req, ("id", "application_id", "status", "message", "requested_fields", "required_document_types", "created_at")), "application": await self._client_view(store, app)}
+            return {"information_request": _public(req, ("id", "application_id", "status", "message", "requested_fields", "required_document_types", "created_at")), "application": _queue_view(app)}
 
     async def _approve(self, actor: dict, path: dict, query: dict, body: dict) -> dict:
         require_role(actor, *_BANK_ROLE)

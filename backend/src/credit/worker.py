@@ -11,8 +11,26 @@ from credit.adapters import AdapterFailure, AdapterNeedsInfo, canonical_json, po
 from credit.common import audit, enqueue, event, new_id, now, touch
 from credit.config import Settings
 from credit.database import Database
+from credit.logging_config import configure_logging
 
 LOG = logging.getLogger(__name__)
+
+
+def _job_log_fields(
+    job: dict[str, Any], *, event_name: str, error_code: str | None = None
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "event": event_name,
+        "request_id": job.get("request_id"),
+        "job_id": job.get("id"),
+        "application_id": job.get("application_id"),
+        "snapshot_id": job.get("snapshot_id"),
+        "source": job.get("source"),
+        "attempt": job.get("attempt", job.get("cycle_attempt", 0)),
+    }
+    if error_code:
+        fields["error_code"] = error_code
+    return fields
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -239,6 +257,10 @@ class Worker:
             await touch(store, app)
             await event(store, app, None, "processing_succeeded", "Автоматическая обработка заявки завершена.")
             await audit(store, None, "worker.step.succeeded", "application", app["id"], job_id=job["id"], snapshot_id=job["snapshot_id"])
+        LOG.info(
+            "Worker adapter step succeeded",
+            extra=_job_log_fields(job, event_name="worker.adapter.succeeded"),
+        )
 
     async def _finish_needs_info(self, job: dict[str, Any], claim_id: str, envelope: dict[str, Any]) -> None:
         async with self.db.transaction() as store:
@@ -267,6 +289,10 @@ class Worker:
             await touch(store, app)
             await event(store, app, None, "information_requested", "Для продолжения заявки нужны дополнительные сведения.")
             await audit(store, None, "worker.needs_info", "application", app["id"], job_id=job["id"], snapshot_id=job["snapshot_id"])
+        LOG.info(
+            "Worker step requires additional information",
+            extra=_job_log_fields(job, event_name="worker.needs_info"),
+        )
 
     async def _finish_failure(self, job: dict[str, Any], claim_id: str, failure: AdapterFailure) -> None:
         async with self.db.transaction() as store:
@@ -304,6 +330,15 @@ class Worker:
             message = "Обработка заявки поставлена на повтор." if retry else "Техническая обработка приостановлена до восстановления сотрудником банка."
             await event(store, app, None, "processing_retry_scheduled" if retry else "processing_blocked", message)
             await audit(store, None, "worker.step.failed", "application", app["id"], job_id=job["id"], snapshot_id=job["snapshot_id"], error_code=failure.code, retryable=failure.retryable)
+        log_failure = LOG.warning if retry else LOG.error
+        log_failure(
+            "Worker step retry scheduled" if retry else "Worker step blocked",
+            extra=_job_log_fields(
+                job,
+                event_name="worker.retry_scheduled" if retry else "worker.blocked",
+                error_code=failure.code,
+            ),
+        )
 
     async def _process_disbursement(self, job: dict[str, Any], claim_id: str) -> None:
         async with self.db.transaction() as store:
@@ -322,6 +357,10 @@ class Worker:
             await touch(store, app)
             await event(store, app, None, "disbursement_simulated", "Имитация выдачи завершена.")
             await audit(store, None, "worker.disbursement.succeeded", "application", app["id"], job_id=job["id"], snapshot_id=job["snapshot_id"])
+        LOG.info(
+            "Simulated disbursement completed",
+            extra=_job_log_fields(job, event_name="worker.disbursement.succeeded"),
+        )
 
     async def _owned_current(self, store: Any, job: dict[str, Any], claim_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         app = await store.get("applications", job["application_id"], lock=True)
@@ -381,6 +420,7 @@ def _latest_attempt(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 async def main() -> None:
     import signal
+    configure_logging()
     settings = Settings()
     database = Database(settings.database_url)
     worker = Worker(database, settings)
@@ -397,5 +437,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())

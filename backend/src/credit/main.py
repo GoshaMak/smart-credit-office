@@ -134,6 +134,10 @@ def _download_response(download: Any) -> Response:
 
 
 def create_app(settings: Any = None, database: Any = None, storage: Any = None) -> FastAPI:
+    from credit.logging_config import configure_logging
+
+    configure_logging()
+
     from credit.auth import AuthService
     from credit.companies import CompanyService
     from credit.applications import ApplicationService
@@ -178,12 +182,25 @@ def create_app(settings: Any = None, database: Any = None, storage: Any = None) 
         request.state.request_id = str(uuid4())
         try:
             response = await call_next(request)
-        except Exception:
-            LOG.exception("Unhandled HTTP error", extra={"request_id": request.state.request_id})
-            response = _error(500, "Внутренняя ошибка сервера.")
+        except Exception as exc:
+            if isinstance(exc, ApiError):
+                response = await handle_api_error(request, exc)
+            elif isinstance(exc, HTTPException):
+                response = await handle_http_error(request, exc)
+            else:
+                response = await handle_unexpected(request, exc)
         if request.url.path.startswith(API_PREFIX + "/auth/"):
             response.headers["Cache-Control"] = "no-store"
-        LOG.info("HTTP request", extra={"request_id": request.state.request_id, "method": request.method, "path": request.url.path, "status": response.status_code})
+        LOG.info(
+            "HTTP request",
+            extra={
+                "event": "http.request",
+                "request_id": request.state.request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+            },
+        )
         return response
 
     @app.exception_handler(ApiError)

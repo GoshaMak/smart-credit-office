@@ -46,7 +46,9 @@ def _verify_password(password: str, encoded: str) -> bool:
             return False
         if (int(n), int(r), int(p)) != (_SCRYPT_N, _SCRYPT_R, _SCRYPT_P):
             return False
-        decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        def decode(value: str) -> bytes:
+            return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
         expected = decode(hash_text)
         if len(expected) != _SCRYPT_LENGTH:
             return False

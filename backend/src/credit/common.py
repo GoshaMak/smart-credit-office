@@ -104,6 +104,26 @@ def application_view(app, bank=False):
     return result
 
 
+async def client_application_view(store, app):
+    """Build a client-safe application view with actions matching current resources."""
+    result = application_view(app)
+    actions = result['available_actions']
+    documents = await store.list('documents', application_id=app['id'])
+    snapshots = await store.list('application_snapshots', application_id=app['id'])
+    frozen_ids = {doc_id for snapshot in snapshots for doc_id in snapshot.get('document_ids', [])}
+    if not any(doc.get('deleted_at') is None and doc['id'] not in frozen_ids for doc in documents):
+        actions[:] = [action for action in actions if action != 'delete_document']
+    if app.get('status') == 'NeedsInfo':
+        requests = await store.list('information_requests', application_id=app['id'], status='open')
+        if not requests:
+            actions[:] = [action for action in actions if action != 'answer_information_request']
+    if app.get('status') == 'Offered':
+        offers = await store.list('offers', application_id=app['id'], status='pending')
+        if not offers:
+            actions[:] = [action for action in actions if action not in ('accept_offer', 'decline_offer')]
+    return result
+
+
 def page(items, query=None, *, limit=None, offset=None):
     query = query or {}
     limit = int(query.get('limit', 20) if limit is None else limit)

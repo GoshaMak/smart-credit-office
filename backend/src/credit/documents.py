@@ -15,10 +15,10 @@ from credit.common import (
     ApiError,
     audit,
     check_version,
+    client_application_view,
     event,
     new_id,
     now,
-    page,
     require_application,
     touch,
 )
@@ -237,11 +237,7 @@ class DocumentService:
         return public_app
 
     async def _application_response(self, store: Any, app: dict[str, Any]) -> dict[str, Any]:
-        # Shared projection is used by application endpoints to keep action
-        # availability and customer-facing fields identical.
-        from credit.common import application_view
-
-        return application_view(app)
+        return await client_application_view(store, app)
 
     async def _release_reservation(self, reservation_id: str) -> None:
         async with self.db.transaction() as store:
