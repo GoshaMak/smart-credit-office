@@ -7,11 +7,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_SQLC_VERSION = "v1.31.1"
-GENERATED_ROOT = ROOT / "src/generated/stack_check"
-EXPECTED_FILES = {"models.py", "stack_check.py"}
+GENERATED_ROOT = ROOT / "src/generated"
+EXPECTED_FILES = {
+    "stack_check/models.py",
+    "stack_check/stack_check.py",
+    "creditdb/models.py",
+    "creditdb/repository.py",
+}
 
 
 def generated_hashes() -> dict[str, str]:
@@ -20,7 +24,9 @@ def generated_hashes() -> dict[str, str]:
     if names != EXPECTED_FILES:
         raise RuntimeError(f"Unexpected generated Python files: {sorted(names)}")
     return {
-        path.relative_to(GENERATED_ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        path.relative_to(GENERATED_ROOT)
+        .as_posix(): hashlib.sha256(path.read_bytes())
+        .hexdigest()
         for path in files
     }
 
@@ -38,7 +44,9 @@ def main() -> int:
         return exc.returncode
 
     if version != EXPECTED_SQLC_VERSION:
-        print(f"Expected sqlc {EXPECTED_SQLC_VERSION}, found {version}", file=sys.stderr)
+        print(
+            f"Expected sqlc {EXPECTED_SQLC_VERSION}, found {version}", file=sys.stderr
+        )
         return 2
 
     try:
@@ -48,7 +56,9 @@ def main() -> int:
         return 2
 
     env = os.environ.copy()
-    env.setdefault("XDG_CACHE_HOME", str(Path(tempfile.gettempdir()) / "hackathon-sqlc-cache"))
+    env.setdefault(
+        "XDG_CACHE_HOME", str(Path(tempfile.gettempdir()) / "hackathon-sqlc-cache")
+    )
     try:
         subprocess.run(
             ["sqlc", "generate", "-f", "sqlc.yaml"], cwd=ROOT, env=env, check=True
@@ -59,10 +69,16 @@ def main() -> int:
         return 1
 
     if before != after:
-        print("Generated files changed; regenerate and review the sqlc output:", file=sys.stderr)
+        print(
+            "Generated files changed; regenerate and review the sqlc output:",
+            file=sys.stderr,
+        )
         for name in sorted(before.keys() | after.keys()):
             if before.get(name) != after.get(name):
-                print(f"  {name}: {before.get(name, 'missing')} -> {after.get(name, 'missing')}", file=sys.stderr)
+                print(
+                    f"  {name}: {before.get(name, 'missing')} -> {after.get(name, 'missing')}",
+                    file=sys.stderr,
+                )
         return 1
 
     print(f"sqlc {version}: generated file set and hashes are stable")

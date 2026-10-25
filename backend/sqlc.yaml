@@ -8,6 +8,16 @@ plugins:
 
 sql:
   - engine: postgresql
+    schema: db/migrations/app/0001_core.sql
+    queries: db/queries/repository.sql
+    codegen:
+      - plugin: py
+        out: src/generated/creditdb
+        options:
+          package: creditdb
+          emit_async_querier: true
+          emit_sync_querier: false
+  - engine: postgresql
     schema: db/migrations/0001_stack_check.sql
     queries: db/queries/stack_check.sql
     codegen:
